@@ -1,0 +1,22 @@
+[Unit]
+Description=Decision Tools MCP
+After=network-online.target
+
+[Container]
+Image=@IMAGE_ID@
+Pull=never
+ContainerName=decision-tools
+PublishPort=127.0.0.1:8789:8789
+Volume=decision-tools-state:/var/lib/decision-tools:Z
+Secret=decision-tools-token,target=decision-tools-token,uid=10001,gid=10001,mode=0400
+Environment=DECISION_TOOLS_TOKEN_FILE=/run/secrets/decision-tools-token
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+[Service]
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

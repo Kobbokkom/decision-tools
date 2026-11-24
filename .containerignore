@@ -1,0 +1,12 @@
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!migrations/
+!migrations/**
+!assets/
+!assets/icon.png
+!examples/
+!examples/**
+!Containerfile

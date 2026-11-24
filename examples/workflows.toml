@@ -1,0 +1,71 @@
+[scripts.pr-summary]
+program = "./evidence.py"
+args = ["pr"]
+timeout_secs = 5
+
+[scripts.release-probe]
+program = "./evidence.py"
+args = ["deployment"]
+timeout_secs = 5
+
+[scripts.result]
+program = "./evidence.py"
+args = ["result"]
+timeout_secs = 5
+
+[workflows.pr-triage]
+description = "Classify a PR from its changed paths and summary. Returns the evidence and review lane."
+entry = "collect"
+allow_provider = true
+
+[workflows.pr-triage.input]
+paths = "string_list"
+summary = "string"
+
+[workflows.pr-triage.steps.collect]
+kind = "script"
+script = "pr-summary"
+next = "classify"
+
+[workflows.pr-triage.steps.classify]
+kind = "decision"
+source = "collect"
+question = { type = "choice", instructions = "Which review lane fits the changed paths and stated behavior? Use focused_review when the evidence calls for extra scrutiny or is insufficient.", criteria = { focused_review = "Touches auth, deployments, schema, credentials, permissions or has insufficient evidence", routine = "Sufficient evidence of a small, routine change" } }
+on = { focused_review = "handoff", routine = "$done" }
+
+[workflows.pr-triage.steps.handoff]
+kind = "script"
+script = "result"
+next = "$done"
+
+[workflows.deployment-check]
+description = "Verify a deployment response fixture against the expected version and health."
+entry = "collect"
+allow_provider = true
+
+[workflows.deployment-check.input]
+expected_version = "string"
+actual_version = "string"
+http_status = "integer"
+
+[workflows.deployment-check.steps.collect]
+kind = "script"
+script = "release-probe"
+next = "verify"
+
+[workflows.deployment-check.steps.verify]
+kind = "decision"
+source = "collect"
+question = { type = "noul", instructions = "Does the evidence show healthy HTTP status and a version matching the expected release?" }
+on = { yes = "$done", no = "report" }
+
+[workflows.deployment-check.steps.report]
+kind = "script"
+script = "result"
+next = "$done"
+
+# An operator can enable a UTC interval by declaring a schedule with fixed input.
+# [schedules.release-sample]
+# workflow = "deployment-check"
+# every_secs = 3600
+# input = { expected_version = "0.1.0", actual_version = "0.1.0", http_status = 200 }
