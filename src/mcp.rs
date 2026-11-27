@@ -10,19 +10,64 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::{features::decision::DecideRequest, orchestration::Engine};
+use crate::{
+    features::{
+        browse::{self, BrowseRequest},
+        decision::{DecideRequest, Decision},
+        search::{self, SearchRequest},
+    },
+    orchestration::Engine,
+};
 
 #[derive(Clone)]
 pub struct Mcp {
-    engine: Engine,
+    /// Workflow modes carry an engine; local mode has none and serves decide, grep and browse.
+    engine: Option<Engine>,
+    decision: Decision,
+    /// The Jev-model provider for search and browsing, and the model that writes field text.
+    jev: Decision,
+    text_model: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl Mcp {
-    pub fn new(engine: Engine) -> Self {
+    pub fn new(engine: Engine, decision: Decision) -> Self {
+        let mut tool_router = Self::tool_router();
+        tool_router.remove_route("grep");
+        tool_router.remove_route("browse");
         Self {
-            engine,
-            tool_router: Self::tool_router(),
+            engine: Some(engine),
+            jev: decision.clone(),
+            decision,
+            text_model: String::new(),
+            tool_router,
+        }
+    }
+
+    /// Local mode removes every route that calls this.
+    fn engine(&self) -> &Engine {
+        self.engine
+            .as_ref()
+            .expect("workflow tools are not served in local mode")
+    }
+
+    /// Tools that need this machine: its files, its browser and its localhost.
+    pub fn local(decision: Decision, jev_model: &str, text_model: String) -> Self {
+        let mut tool_router = Self::tool_router();
+        for name in [
+            "workflow_list",
+            "workflow_start",
+            "workflow_get",
+            "workflow_cancel",
+        ] {
+            tool_router.remove_route(name);
+        }
+        Self {
+            engine: None,
+            jev: decision.with_model(jev_model),
+            decision,
+            text_model,
+            tool_router,
         }
     }
 }
@@ -50,7 +95,26 @@ impl Mcp {
         description = "Classify or score evidence against explicit criteria. Confirm that OpenRouter may receive the evidence before setting allow_provider."
     )]
     async fn decide(&self, Parameters(args): Parameters<DecideRequest>) -> CallToolResult {
-        reply(self.engine.decide(args).await)
+        reply(match &self.engine {
+            Some(engine) => engine.decide(args).await,
+            None => self.decision.decide(args).await,
+        })
+    }
+
+    #[tool(
+        description = "Find where a described behavior is implemented when files or symbols are unknown. Pass one concrete behavior question and the smallest absolute subtree. Returns ranked file locations with verbatim excerpts; they are leads, so read the source before relying on them. Source excerpts go to OpenRouter after allow_provider. Key files, credential stores, lockfiles, hidden paths and ignored files are never read.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn grep(&self, Parameters(args): Parameters<SearchRequest>) -> CallToolResult {
+        reply(search::search(&self.jev, args).await)
+    }
+
+    #[tool(
+        description = "Check or operate a web page with a private headless Chrome. Give a starting URL (localhost works), the goal, and the exact content or URL that shows it is met. The browser acts only on observed controls and stops at the step budget. The task, URLs, page text and controls go to OpenRouter after allow_provider, so use synthetic or approved data. Typing is off unless allow_typing is set. Check the returned final URL and text yourself.",
+        annotations(open_world_hint = true)
+    )]
+    async fn browse(&self, Parameters(args): Parameters<BrowseRequest>) -> CallToolResult {
+        reply(browse::browse(&self.jev, &self.text_model, args).await)
     }
 
     #[tool(
@@ -58,14 +122,14 @@ impl Mcp {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn workflow_list(&self) -> CallToolResult {
-        reply(self.engine.list().await)
+        reply(self.engine().list().await)
     }
 
     #[tool(
         description = "Start a registered workflow with validated inputs and return its run ID."
     )]
     async fn workflow_start(&self, Parameters(args): Parameters<Start>) -> CallToolResult {
-        reply(self.engine.start(&args.workflow, args.input).await)
+        reply(self.engine().start(&args.workflow, args.input).await)
     }
 
     #[tool(
@@ -73,14 +137,14 @@ impl Mcp {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn workflow_get(&self, Parameters(args): Parameters<RunId>) -> CallToolResult {
-        reply(self.engine.get(&args.id).await)
+        reply(self.engine().get(&args.id).await)
     }
 
     #[tool(
         description = "Cancel a queued or running workflow. Completed effects may already have occurred."
     )]
     async fn workflow_cancel(&self, Parameters(args): Parameters<RunId>) -> CallToolResult {
-        reply(self.engine.cancel(&args.id).await)
+        reply(self.engine().cancel(&args.id).await)
     }
 }
 
@@ -99,7 +163,7 @@ impl ServerHandler for Mcp {
                     .with_mime_type("image/png")
                     .with_sizes(vec!["128x128".to_owned()])]),
             )
-            .with_instructions("Call workflow_list for registered procedures, or decide for a judgment against explicit criteria.")
+            .with_instructions("Call decide for a judgment against explicit criteria, grep to find where a behavior is implemented, or browse to check a web page. When workflow tools are listed, call workflow_list for registered procedures.")
     }
 }
 

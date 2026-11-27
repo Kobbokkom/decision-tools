@@ -40,8 +40,9 @@ use crate::{
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    /// Workflow registry. Not used by the local mode.
     #[arg(long, env = "DECISION_TOOLS_CONFIG")]
-    config: PathBuf,
+    config: Option<PathBuf>,
     #[arg(
         long,
         env = "DECISION_TOOLS_DB",
@@ -57,14 +58,30 @@ struct Args {
         default_value = "liquid/d1.2-ultra"
     )]
     model: String,
+    /// Model that rates source and drives the browser in the local mode.
+    #[arg(
+        long,
+        env = "DECISION_TOOLS_JEV_MODEL",
+        default_value = "typesafe/jev-1.14"
+    )]
+    jev_model: String,
+    /// Model that writes field values when the browser may type.
+    #[arg(
+        long,
+        env = "DECISION_TOOLS_TEXT_MODEL",
+        default_value = "inception/mercury-2.5"
+    )]
+    text_model: String,
     #[command(subcommand)]
     mode: Mode,
 }
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Run MCP on standard input/output.
+    /// Run MCP on standard input/output with workflows and the database.
     Stdio,
+    /// Run MCP on standard input/output with decide, grep and browse for this machine.
+    Local,
     /// Serve authenticated Streamable HTTP MCP.
     Serve {
         #[arg(long, env = "DECISION_TOOLS_LISTEN", default_value = "127.0.0.1:8789")]
@@ -77,8 +94,25 @@ enum Mode {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if matches!(args.mode, Mode::Local) {
+        let decision = if args.demo {
+            Decision::Demo
+        } else {
+            Decision::openrouter(args.model, secret("OPENROUTER_API_KEY")?)?
+        };
+        Mcp::local(decision, &args.jev_model, args.text_model)
+            .serve(stdio())
+            .await?
+            .waiting()
+            .await?;
+        return Ok(());
+    }
+    let config = args
+        .config
+        .as_deref()
+        .context("--config is required for this mode")?;
     let revision = if args.demo { "demo" } else { &args.model };
-    let registry = Registry::load(&args.config, revision)?;
+    let registry = Registry::load(config, revision)?;
     if matches!(args.mode, Mode::CheckConfig) {
         println!("Workflow registry is valid.");
         return Ok(());
@@ -89,6 +123,7 @@ async fn main() -> Result<()> {
     } else {
         Decision::openrouter(args.model, secret("OPENROUTER_API_KEY")?)?
     };
+    let tool_decision = decision.clone();
     let http = match args.mode {
         Mode::Serve { listen } => {
             let key = secret("DECISION_TOOLS_TOKEN")?;
@@ -106,9 +141,16 @@ async fn main() -> Result<()> {
     let engine = Engine::open(registry, &args.db, decision).await?;
     let transport = async {
         if let Some((listener, auth)) = http {
-            serve_http(engine.clone(), listener, auth, args.demo).await
+            serve_http(
+                engine.clone(),
+                tool_decision.clone(),
+                listener,
+                auth,
+                args.demo,
+            )
+            .await
         } else {
-            Mcp::new(engine.clone())
+            Mcp::new(engine.clone(), tool_decision.clone())
                 .serve(stdio())
                 .await?
                 .waiting()
@@ -126,11 +168,12 @@ async fn main() -> Result<()> {
 
 async fn serve_http(
     engine: Engine,
+    decision: Decision,
     listener: tokio::net::TcpListener,
     auth: Arc<[u8]>,
     demo: bool,
 ) -> Result<()> {
-    let mcp = Mcp::new(engine.clone());
+    let mcp = Mcp::new(engine.clone(), decision);
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)

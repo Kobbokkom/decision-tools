@@ -38,6 +38,17 @@ The deployment example takes a captured HTTP response as a fixture. An operator 
 | `workflow_get` | Read one run's status, completed steps, and usage. |
 | `workflow_cancel` | Cancel pending execution or signal a running step. Completed external effects may remain. |
 
+## Local tools: grep and browse
+
+`decision-tools local` serves `decide`, `grep` and `browse` on stdio for one machine. It needs no registry or database, so every client session can start its own copy. Run it where the source and the browser are, since the shared server cannot see your files or localhost.
+
+| MCP tool | Purpose |
+| --- | --- |
+| `grep` | Find where a described behavior is implemented. The provider rates file previews, then line windows of the best files. Returns ranked paths, line ranges and excerpts. Key files, credential stores, lockfiles, hidden and ignored paths are never read. |
+| `browse` | Check or operate a page in a private headless Chrome with a throwaway profile. Each step reads a numbered element table and asks for one operation and one target in a single request. Typing needs `allow_typing`. Set `DECISION_TOOLS_CHROME` when Chrome is not in a standard place. |
+
+Both tools send data to OpenRouter only when the call sets `allow_provider`. They use `DECISION_TOOLS_JEV_MODEL` (default `typesafe/jev-1.14`). `browse` writes field values with `DECISION_TOOLS_TEXT_MODEL`. Register the client command as `decision-tools local` with `OPENROUTER_API_KEY_FILE` set.
+
 For live decisions, grant the process an `OPENROUTER_API_KEY_FILE` or `OPENROUTER_API_KEY` and remove `--demo`. The default model is `liquid/d1.2-ultra`. Override it through `DECISION_TOOLS_MODEL`. A direct call accepts `evidence`, a `questions` map, and `allow_provider` after confirming where evidence can be sent. The answer includes provider usage when supplied.
 
 ## Register your own scripts

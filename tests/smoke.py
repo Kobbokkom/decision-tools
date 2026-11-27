@@ -24,6 +24,7 @@ INIT = {
 PR = {"paths": ["README.md"], "summary": "Update an example description"}
 DEPLOYMENT = {"expected_version": "0.1.0", "actual_version": "0.1.0", "http_status": 200}
 TOOLS = {"decide", "workflow_list", "workflow_start", "workflow_get", "workflow_cancel"}
+LOCAL_TOOLS = {"decide", "grep", "browse"}
 TERMINAL = {"succeeded", "failed", "cancelled", "interrupted"}
 
 
@@ -40,11 +41,11 @@ def call(send, name, params=None, error=False):
     return result["structuredContent"]
 
 
-def initialize(send):
+def initialize(send, expected=TOOLS):
     assert send("initialize", INIT)["serverInfo"]["name"] == "decision-tools"
     send("notifications/initialized", {}, False)
     tools = send("tools/list", {})
-    assert {tool["name"] for tool in tools["tools"]} == TOOLS, tools
+    assert {tool["name"] for tool in tools["tools"]} == expected, tools
 
 
 def examples(send):
@@ -99,9 +100,10 @@ def stop(process):
         process.communicate(timeout=5)
 
 
-def stdio(binary, config, database, predicate):
+def stdio(binary, config, database, predicate, local_mode=False):
+    command = [binary, "--demo", "local"] if local_mode else [binary, "--config", config, "--db", database, "--demo", "stdio"]
     with subprocess.Popen(
-        [binary, "--config", config, "--db", database, "--demo", "stdio"],
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     ) as process:
@@ -118,10 +120,23 @@ def stdio(binary, config, database, predicate):
                     assert "error" not in response, response
                     return response["result"]
 
-            initialize(send)
+            initialize(send, LOCAL_TOOLS if local_mode else TOOLS)
             predicate(send)
         finally:
             stop(process)
+
+
+def local_tools(send, tree):
+    found = call(send, "grep", {"question": "Where is the event sent?", "root": str(tree), "allow_provider": True})
+    assert found["results"][0]["path"] == "src/events.rs", found
+    assert "send_event" in found["results"][0]["excerpt"]
+    assert found["coverage"]["files_found"] == 1 and not found["coverage"]["incomplete"], found
+    assert "allow_provider" in call(
+        send, "grep", {"question": "x", "root": str(tree), "allow_provider": False}, error=True
+    )["error"]
+    assert "http" in call(
+        send, "browse", {"url": "file:///etc/hosts", "task": "x", "allow_provider": True}, error=True
+    )["error"]
 
 
 def http_send(url, token, origin=None):
@@ -261,6 +276,10 @@ every_secs = 2
         checked = subprocess.run([binary, "--config", invalid, "check-config"], capture_output=True, text=True)
         assert checked.returncode != 0 and "cycle" in checked.stderr, checked.stderr
         stdio(binary, registered, temporary / "lifecycle.db", lambda send: lifecycle(send, temporary))
+        tree = temporary / "tree"
+        (tree / "src").mkdir(parents=True)
+        (tree / "src/events.rs").write_text("fn send_event() {\n    post();\n}\n")
+        stdio(binary, None, None, lambda send: local_tools(send, tree), local_mode=True)
 
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))

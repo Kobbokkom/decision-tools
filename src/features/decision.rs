@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
+const CHAT_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_RESPONSE: usize = 128 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -26,17 +27,22 @@ pub enum Question {
 
 impl Question {
     pub fn validate(&self) -> Result<()> {
+        self.validate_with(16)
+    }
+
+    /// Choice and score questions normally offer at most 16 criteria; local tools raise the bound.
+    fn validate_with(&self, max_criteria: usize) -> Result<()> {
         let instructions = match self {
             Self::Choice {
                 instructions,
                 criteria,
             } => {
                 ensure!(
-                    (2..=16).contains(&criteria.len())
+                    (2..=max_criteria).contains(&criteria.len())
                         && criteria.iter().all(|(label, text)| !label.trim().is_empty()
                             && label.len() <= 80
                             && valid_text(text)),
-                    "choice requires 2 to 16 named criteria"
+                    "choice requires 2 to {max_criteria} named criteria"
                 );
                 instructions
             }
@@ -46,9 +52,9 @@ impl Question {
                 criteria,
             } => {
                 ensure!(
-                    (2..=16).contains(&criteria.len())
+                    (2..=max_criteria).contains(&criteria.len())
                         && criteria.iter().all(|text| valid_text(text)),
-                    "score requires 2 to 16 ordered criteria"
+                    "score requires 2 to {max_criteria} ordered criteria"
                 );
                 instructions
             }
@@ -136,17 +142,74 @@ impl Decision {
     }
 
     pub async fn decide(&self, request: DecideRequest) -> Result<Value> {
-        self.decide_at(request, ENDPOINT).await
+        self.decide_at(request, ENDPOINT, 16).await
     }
 
-    async fn decide_at(&self, request: DecideRequest, endpoint: &str) -> Result<Value> {
+    /// Same call for local tools whose choices list every element on a page.
+    pub async fn decide_wide(&self, request: DecideRequest) -> Result<Value> {
+        self.decide_at(request, ENDPOINT, 256).await
+    }
+
+    /// The same provider with another model, for tools that need the Jev models.
+    pub fn with_model(&self, model: &str) -> Self {
+        match self {
+            Self::Demo => Self::Demo,
+            Self::OpenRouter { client, key, .. } => Self::OpenRouter {
+                client: client.clone(),
+                model: model.to_owned(),
+                key: key.clone(),
+            },
+        }
+    }
+
+    /// One short chat completion that returns a JSON object, for text the decisions API cannot write.
+    pub async fn complete_json(&self, model: &str, system: &str, user: &Value) -> Result<Value> {
+        let Self::OpenRouter { client, key, .. } = self else {
+            bail!("text generation is unavailable in demo mode");
+        };
+        let response = client
+            .post(CHAT_ENDPOINT)
+            .bearer_auth(key)
+            .json(&json!({
+                "model": model, "max_tokens": 1024,
+                "response_format": {"type": "json_object"},
+                "reasoning": {"enabled": false},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user.to_string()},
+                ],
+            }))
+            .send()
+            .await
+            .context("OpenRouter chat request failed")?;
+        ensure!(
+            response.status().is_success(),
+            "OpenRouter chat returned HTTP {}",
+            response.status().as_u16()
+        );
+        let body: Value = response
+            .json()
+            .await
+            .context("invalid OpenRouter chat JSON")?;
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .context("missing chat content")?;
+        serde_json::from_str(text).context("chat content is not JSON")
+    }
+
+    async fn decide_at(
+        &self,
+        request: DecideRequest,
+        endpoint: &str,
+        max_criteria: usize,
+    ) -> Result<Value> {
         ensure!(
             (1..=16).contains(&request.questions.len())
                 && request.questions.keys().all(|key| crate::valid_id(key)),
             "provide 1 to 16 named questions"
         );
         for question in request.questions.values() {
-            question.validate()?;
+            question.validate_with(max_criteria)?;
         }
         // A string state prevents JSON evidence from becoming provider-side image URLs.
         let state = match request.evidence {
@@ -238,6 +301,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wide_choices_are_a_local_tool_allowance() {
+        let wide = Question::Choice {
+            instructions: "Which?".into(),
+            criteria: (0..100)
+                .map(|i| (i.to_string(), "option".to_owned()))
+                .collect(),
+        };
+        assert!(wide.validate().is_err());
+        assert!(wide.validate_with(256).is_ok());
+    }
+
     #[tokio::test]
     async fn unapproved_evidence_is_rejected_before_http() {
         let result = Decision::openrouter("model".into(), "unused".into())
@@ -292,6 +367,7 @@ mod tests {
                     allow_provider: true,
                 },
                 &endpoint,
+                16,
             )
             .await;
         server.abort();
