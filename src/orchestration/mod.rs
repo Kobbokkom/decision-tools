@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::features::{
     decision::{DecideRequest, Decision, Question},
-    registry::{DONE, INPUT, Registry, Step},
+    registry::{DONE, INPUT, Registry, Step, Workflow},
     script,
 };
 use store::{Claim, Store};
@@ -49,7 +49,10 @@ impl Engine {
                     .iter()
                     .map(|(key, kind)| (key, kind.name()))
                     .collect();
-                json!({"name":name, "description":workflow.description, "input":input})
+                json!({
+                    "name":name, "description":workflow.description, "input":input,
+                    "requires_provider_approval":self.requires_provider_approval(workflow)
+                })
             })
             .collect();
         let mut schedules = Vec::new();
@@ -72,13 +75,30 @@ impl Engine {
         self.decision.decide(request).await
     }
 
-    pub async fn start(&self, workflow: &str, input: Map<String, Value>) -> Result<Value> {
+    fn requires_provider_approval(&self, workflow: &Workflow) -> bool {
+        !matches!(self.decision, Decision::Demo)
+            && workflow
+                .steps
+                .values()
+                .any(|step| matches!(step, Step::Decision { .. }))
+    }
+
+    pub async fn start(
+        &self,
+        workflow: &str,
+        input: Map<String, Value>,
+        allow_provider: bool,
+    ) -> Result<Value> {
         let definition = self
             .registry
             .workflows
             .get(workflow)
             .context("unknown workflow")?;
         definition.validate_input(&input)?;
+        ensure!(
+            !self.requires_provider_approval(definition) || allow_provider,
+            "OpenRouter workflow evidence requires allow_provider"
+        );
         let id = self
             .store
             .insert(
@@ -130,7 +150,6 @@ impl Engine {
                 if slot <= *last_slot {
                     continue;
                 }
-                *last_slot = slot;
                 let workflow = &self.registry.workflows[&schedule.workflow];
                 self.store
                     .insert(
@@ -141,6 +160,7 @@ impl Engine {
                         Some((id, slot)),
                     )
                     .await?;
+                *last_slot = slot;
             }
         }
     }
@@ -161,10 +181,13 @@ impl Engine {
         match result {
             Ok((value, next)) => {
                 results.insert(claim.next_step.clone(), value);
-                let status = if next == DONE { "succeeded" } else { "queued" };
-                let next = (next != DONE).then_some(next);
+                let (status, next, error) = match next {
+                    Some(DONE) => ("succeeded", None, None),
+                    Some(next) => ("queued", Some(next), None),
+                    None => ("failed", None, Some("provider refused the decision")),
+                };
                 self.store
-                    .finish(&claim.id, status, next, &results, None)
+                    .finish(&claim.id, status, next, &results, error)
                     .await
             }
             Err(error) => {
@@ -182,7 +205,7 @@ impl Engine {
         allow_provider: bool,
         input: &Value,
         results: &Map<String, Value>,
-    ) -> Result<(Value, &'a str)> {
+    ) -> Result<(Value, Option<&'a str>)> {
         match step {
             Step::Script { script: name, next } => {
                 let payload = json!({"input":input, "results":results});
@@ -192,7 +215,7 @@ impl Engine {
                     &payload,
                 )
                 .await?;
-                Ok((output, next))
+                Ok((output, Some(next)))
             }
             Step::Decision {
                 source,
@@ -213,6 +236,9 @@ impl Engine {
                     })
                     .await?;
                 let route = &answer["answers"]["route"];
+                if route["type"] == "refusal" {
+                    return Ok((answer, None));
+                }
                 let outcome = match question {
                     Question::Choice { .. } => {
                         route["choice"].as_str().context("missing choice")?
@@ -236,7 +262,7 @@ impl Engine {
                 let next = on
                     .get(outcome)
                     .context("decision outcome is unconfigured")?;
-                Ok((answer, next))
+                Ok((answer, Some(next)))
             }
         }
     }
@@ -247,4 +273,43 @@ fn unix_time() -> Result<i64> {
         .duration_since(UNIX_EPOCH)?
         .as_secs()
         .try_into()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn openrouter_workflow_requires_manual_run_approval() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let registry = Registry::load(Path::new("examples/workflows.toml"), "liquid/d1.2-ultra")?;
+        let backend = Decision::openrouter("liquid/d1.2-ultra".into(), "unused-test-key".into())?;
+        let engine = Engine::open(registry, &directory.path().join("state.db"), backend).await?;
+        let input = Map::from_iter([
+            ("paths".into(), json!(["README.md"])),
+            ("summary".into(), json!("example")),
+        ]);
+        let listing = engine.list().await?;
+        let workflows = listing["workflows"].as_array().unwrap();
+        assert!(
+            workflows
+                .iter()
+                .any(|workflow| workflow["name"] == "pr-triage"
+                    && workflow["requires_provider_approval"] == true)
+        );
+        let error = engine
+            .start("pr-triage", input.clone(), false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "OpenRouter workflow evidence requires allow_provider"
+        );
+        assert!(engine.store.claim().await?.is_none());
+
+        // Only test admission; no worker is running and no evidence is sent.
+        let run = engine.start("pr-triage", input, true).await?;
+        assert_eq!(run["status"], "queued");
+        Ok(())
+    }
 }

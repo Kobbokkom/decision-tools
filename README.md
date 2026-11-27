@@ -33,8 +33,8 @@ The deployment example takes a captured HTTP response as a fixture. An operator 
 | MCP tool | Purpose |
 | --- | --- |
 | `decide` | Judge evidence against named choice, yes/no, or score questions. |
-| `workflow_list` | Discover the backend, workflow inputs, UTC schedules, and the latest scheduled run IDs. |
-| `workflow_start` | Accept validated input and return a run ID. |
+| `workflow_list` | Discover the backend, workflow inputs, OpenRouter approval requirements, UTC schedules, and the latest scheduled run IDs. |
+| `workflow_start` | Accept validated input and return a run ID. Set `allow_provider` only after approving evidence for a workflow that requires it. |
 | `workflow_get` | Read one run's status, completed steps, and usage. |
 | `workflow_cancel` | Cancel pending execution or signal a running step. Completed external effects may remain. |
 
@@ -49,12 +49,12 @@ The deployment example takes a captured HTTP response as a fixture. An operator 
 
 Both tools send data to OpenRouter only when the call sets `allow_provider`. They use `DECISION_TOOLS_JEV_MODEL` (default `typesafe/jev-1.14`). `browse` writes field values with `DECISION_TOOLS_TEXT_MODEL`. Register the client command as `decision-tools local` with `OPENROUTER_API_KEY_FILE` set.
 
-For live decisions, grant the process an `OPENROUTER_API_KEY_FILE` or `OPENROUTER_API_KEY` and remove `--demo`. The default model is `liquid/d1.2-ultra`. Override it through `DECISION_TOOLS_MODEL`. A direct call accepts `evidence`, a `questions` map, and `allow_provider` after confirming where evidence can be sent. The answer includes provider usage when supplied.
+For live decisions, grant the process an `OPENROUTER_API_KEY_FILE` or `OPENROUTER_API_KEY` and remove `--demo`. The default model is `liquid/d1.2-ultra`. Override it through `DECISION_TOOLS_MODEL`. A direct call accepts `evidence`, a `questions` map, and `allow_provider` after confirming where evidence can be sent. The answer preserves provider usage and identifies any refused questions by type.
 
 ## Register your own scripts
 
 Use [the example registry](examples/workflows.toml) as a starting point. Each executable gets operator-defined arguments and one JSON object on stdin, with `input` and previous step `results`. Exit successfully with one JSON value on stdout. The service validates input before accepting a run and bounds output to 64 KiB. `decision-tools --config workflows.toml check-config` validates the graph.
 
-Use `source = "$input"` or the name of an earlier step. Map each decision outcome to the next registered step or `"$done"`. Choice outcomes use criterion keys, yes/no uses a 0.5 threshold, and score uses `min_score` with `at_or_above` and `below`. An optional schedule starts a workflow on UTC epoch multiples of `every_secs`.
+Use `source = "$input"` or the name of an earlier step. Map each decision outcome to the next registered step or `"$done"`. Choice outcomes use criterion keys, yes/no uses a 0.5 threshold, and score uses `min_score` with `at_or_above` and `below`. An optional schedule starts a workflow on UTC epoch multiples of `every_secs`. If the queue is full, the scheduled run records a failure.
 
 For a shared service, follow the [Fedora deployment and MCP guide](docs/deploy.md). See [execution and evidence policy](docs/policy.md) before deploying a script or enabling external judgments.

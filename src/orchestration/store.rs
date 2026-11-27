@@ -80,14 +80,27 @@ impl Store {
     ) -> Result<Option<String>> {
         let id = Uuid::new_v4().to_string();
         let inserted = sqlx::query_scalar(
-            "INSERT INTO runs (id, workflow, revision, input, status, next_step, schedule, scheduled_at)
-             SELECT ?, ?, ?, ?, 'queued', ?, ?, ?
-             WHERE (SELECT count(*) FROM runs WHERE status IN ('queued', 'running', 'cancelling')) < 128
+            "WITH capacity AS (
+                 SELECT count(*) < 128 AS can_queue
+                 FROM runs WHERE status IN ('queued', 'running', 'cancelling')
+             )
+             INSERT INTO runs (id, workflow, revision, input, status, next_step, schedule, scheduled_at, error)
+             SELECT ?1, ?2, ?3, CASE WHEN can_queue THEN ?4 ELSE '{}' END,
+                 CASE WHEN can_queue THEN 'queued' ELSE 'failed' END,
+                 CASE WHEN can_queue THEN ?5 END, ?6, ?7,
+                 CASE WHEN NOT can_queue THEN 'scheduled slot skipped: workflow queue is full' END
+             FROM capacity WHERE can_queue OR ?6 IS NOT NULL
              ON CONFLICT(schedule, scheduled_at) DO NOTHING RETURNING id",
         )
-        .bind(id).bind(name).bind(revision).bind(serde_json::to_string(input)?).bind(entry)
-        .bind(scheduled.map(|slot| slot.0)).bind(scheduled.map(|slot| slot.1))
-        .fetch_optional(&self.0).await?;
+        .bind(id)
+        .bind(name)
+        .bind(revision)
+        .bind(serde_json::to_string(input)?)
+        .bind(entry)
+        .bind(scheduled.map(|slot| slot.0))
+        .bind(scheduled.map(|slot| slot.1))
+        .fetch_optional(&self.0)
+        .await?;
         Ok(inserted)
     }
 
@@ -225,6 +238,52 @@ mod tests {
         let run = store.get(&id).await?;
         assert_eq!(run["status"], "interrupted");
         assert_eq!(run["results"]["first"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_queue_records_each_missed_schedule_slot_once() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = Store::open(&directory.path().join("state.db"), "revision").await?;
+        sqlx::query(
+            "WITH RECURSIVE ids(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM ids WHERE i < 128)
+             INSERT INTO runs (id, workflow, revision, input, status, next_step)
+             SELECT i, 'workflow', 'revision', '{}', 'queued', 'start' FROM ids",
+        )
+        .execute(&store.0)
+        .await?;
+
+        let input = Map::from_iter([("configured_input".into(), json!("approved fixture"))]);
+        assert!(
+            store
+                .insert("workflow", "revision", "start", &input, None)
+                .await?
+                .is_none()
+        );
+        let slot = Some(("scheduled", 3600));
+        let id = store
+            .insert("workflow", "revision", "start", &input, slot)
+            .await?
+            .unwrap();
+        assert_eq!(store.latest_scheduled("scheduled").await?, Some(id.clone()));
+        let run = store.get(&id).await?;
+        assert_eq!(run["status"], "failed");
+        assert_eq!(
+            run["error"],
+            "scheduled slot skipped: workflow queue is full"
+        );
+        assert_eq!(run["next_step"], Value::Null);
+        let stored_input: String = sqlx::query_scalar("SELECT input FROM runs WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&store.0)
+            .await?;
+        assert_eq!(stored_input, "{}");
+        assert!(
+            store
+                .insert("workflow", "revision", "start", &input, slot)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 }

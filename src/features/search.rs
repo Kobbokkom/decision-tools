@@ -274,7 +274,9 @@ async fn rate(
         };
         meter.cost += answer["usage"]["cost"].as_f64().unwrap_or(0.0);
         for (offset, id) in ids.iter().enumerate() {
-            scores[batch * BATCH + offset] = answer["answers"][id]["noul"].as_f64();
+            let score = answer["answers"][id]["noul"].as_f64();
+            meter.unrated += usize::from(score.is_none());
+            scores[batch * BATCH + offset] = score;
         }
     }
     Ok(scores)
@@ -486,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn broad_roots_are_refused() {
         let home = std::env::var("HOME").unwrap();
-        for root in ["/", "/Users", home.as_str()] {
+        for root in ["/", "/usr", home.as_str()] {
             let error = search(
                 &Decision::Demo,
                 SearchRequest {

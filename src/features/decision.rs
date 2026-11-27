@@ -268,8 +268,13 @@ impl Decision {
             let answer = answers
                 .get(id)
                 .context("missing requested decision answer")?;
-            question.validate_answer(answer)?;
-            validated.insert(id.clone(), answer.clone());
+            let answer = if answer["type"] == "refusal" {
+                json!({"type": "refusal"})
+            } else {
+                question.validate_answer(answer)?;
+                answer.clone()
+            };
+            validated.insert(id.clone(), answer);
         }
         Ok(json!({"model": value["model"], "answers": validated, "usage": value["usage"]}))
     }
@@ -348,7 +353,10 @@ mod tests {
                 assert_eq!(body["questions"]["healthy"]["type"], "noul");
                 Json(json!({
                     "model":"liquid/d1.2-ultra",
-                    "answers":{"healthy":{"type":"noul","noul":0.92}},
+                    "answers":{
+                        "healthy":{"type":"noul","noul":0.92},
+                        "declined":{"type":"refusal","noul":0.99}
+                    },
                     "usage":{"input_tokens":8,"output_tokens":0,"cost":0.000001}
                 }))
             }),
@@ -358,12 +366,20 @@ mod tests {
             .decide_at(
                 DecideRequest {
                     evidence: json!({"ready":true}),
-                    questions: BTreeMap::from([(
-                        "healthy".into(),
-                        Question::Noul {
-                            instructions: "Is the sample healthy?".into(),
-                        },
-                    )]),
+                    questions: BTreeMap::from([
+                        (
+                            "healthy".into(),
+                            Question::Noul {
+                                instructions: "Is the sample healthy?".into(),
+                            },
+                        ),
+                        (
+                            "declined".into(),
+                            Question::Noul {
+                                instructions: "Is the next item available?".into(),
+                            },
+                        ),
+                    ]),
                     allow_provider: true,
                 },
                 &endpoint,
@@ -373,6 +389,7 @@ mod tests {
         server.abort();
         let response = response?;
         assert_eq!(response["answers"]["healthy"]["noul"], 0.92);
+        assert_eq!(response["answers"]["declined"], json!({"type":"refusal"}));
         assert_eq!(response["usage"]["cost"], 0.000001);
         Ok(())
     }

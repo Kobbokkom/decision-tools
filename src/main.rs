@@ -111,8 +111,12 @@ async fn main() -> Result<()> {
         .config
         .as_deref()
         .context("--config is required for this mode")?;
-    let revision = if args.demo { "demo" } else { &args.model };
-    let registry = Registry::load(config, revision)?;
+    let backend = if args.demo {
+        "demo".to_owned()
+    } else {
+        format!("openrouter:{}", args.model)
+    };
+    let registry = Registry::load(config, &backend)?;
     if matches!(args.mode, Mode::CheckConfig) {
         println!("Workflow registry is valid.");
         return Ok(());

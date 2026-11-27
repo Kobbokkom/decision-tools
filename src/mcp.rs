@@ -80,6 +80,9 @@ struct Start {
     /// The exact fields listed for this workflow.
     #[serde(default)]
     input: Map<String, Value>,
+    /// Set only after confirming that OpenRouter may receive the workflow evidence.
+    #[serde(default)]
+    allow_provider: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -118,7 +121,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Find registered workflows when a user asks to run a recurring procedure or an installed script. Lists the decision backend, input fields, and latest scheduled run IDs.",
+        description = "Find registered workflows when a user asks to run a recurring procedure or an installed script. Lists input fields, whether each workflow requires OpenRouter approval, and latest scheduled run IDs.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn workflow_list(&self) -> CallToolResult {
@@ -126,10 +129,14 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Start a registered workflow with validated inputs and return its run ID."
+        description = "Start a registered workflow and return its run ID. If workflow_list reports requires_provider_approval, confirm OpenRouter may receive the evidence before setting allow_provider."
     )]
     async fn workflow_start(&self, Parameters(args): Parameters<Start>) -> CallToolResult {
-        reply(self.engine().start(&args.workflow, args.input).await)
+        reply(
+            self.engine()
+                .start(&args.workflow, args.input, args.allow_provider)
+                .await,
+        )
     }
 
     #[tool(

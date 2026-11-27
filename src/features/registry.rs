@@ -119,6 +119,8 @@ impl Registry {
         let mut hash = Sha256::new();
         hash.update(backend);
         hash.update([0]);
+        hash.update(registry.directory.as_os_str().as_encoded_bytes());
+        hash.update([0]);
         hash.update(bytes);
         registry.revision = format!("{:x}", hash.finalize());
         registry.validate()?;
@@ -309,5 +311,32 @@ impl Step {
             Self::Script { next, .. } => Box::new(std::iter::once(next.as_str())),
             Self::Decision { on, .. } => Box::new(on.values().map(String::as_str)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relocating_config_with_relative_scripts_changes_revision() -> Result<()> {
+        let first = tempfile::tempdir()?;
+        let second = tempfile::tempdir()?;
+        let a = first.path().join("workflows.toml");
+        let b = second.path().join("workflows.toml");
+        std::fs::copy("examples/workflows.toml", &a)?;
+        std::fs::copy(&a, &b)?;
+        let a = Registry::load(&a, "demo")?;
+        let b = Registry::load(&b, "demo")?;
+        assert_ne!(a.revision, b.revision);
+        Ok(())
+    }
+    #[test]
+    fn model_named_demo_has_a_different_backend_revision() -> Result<()> {
+        let path = Path::new("examples/workflows.toml");
+        let demo = Registry::load(path, "demo")?;
+        let openrouter = Registry::load(path, "openrouter:demo")?;
+        assert_ne!(demo.revision, openrouter.revision);
+        Ok(())
     }
 }
