@@ -92,8 +92,9 @@ async fn run(
 ) -> Result<Value> {
     let budget = request.max_steps.unwrap_or(12).clamp(1, 40);
     let task = request.task.trim();
+    let start_internal = host_of(&request.url).is_none_or(|host| internal_host(&host));
     cdp.goto(&request.url).await?;
-    let mut page = observe(cdp).await?;
+    let mut page = observe(cdp, start_internal).await?;
     let (mut history, mut requests, mut cost) = (Vec::<Value>::new(), 0, 0.0);
     let mut status = "step_limit";
     let (mut executed, mut stale) = (0, 0);
@@ -125,14 +126,14 @@ async fn run(
         if !cdp.fresh(&page, &action).await? {
             // The page moved after the decision. Look again without spending a step.
             stale += 1;
-            page = observe(cdp).await?;
+            page = observe(cdp, start_internal).await?;
             continue;
         }
         cdp.act(&action, text.as_deref()).await?;
         executed += 1;
         let before = fingerprint(&page);
         let url_before = page["url"].clone();
-        page = observe(cdp).await?;
+        page = observe(cdp, start_internal).await?;
         let changed = fingerprint(&page) != before;
         history.push(json!({
             "step": executed, "operation": choice.operation, "action": action["label"],
@@ -386,7 +387,54 @@ fn fingerprint(page: &Value) -> String {
     format!("{:x}", Sha256::digest(content.to_string()))
 }
 
-async fn observe(cdp: &mut Cdp) -> Result<Value> {
+/// The host of an http(s) URL, lowercased, without credentials or port.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match authority.strip_prefix('[') {
+        Some(inner) => inner.split(']').next()?,
+        None => authority.split(':').next()?,
+    };
+    Some(host.to_lowercase())
+}
+
+fn internal_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    if host == "localhost"
+        || [".localhost", ".local", ".internal"]
+            .iter()
+            .any(|s| host.ends_with(s))
+    {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || first & 0xfe00 == 0xfc00
+                || first & 0xffc0 == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// A public page must not steer the browser into this machine or its network.
+fn check_destination(url: &str, start_internal: bool) -> Result<()> {
+    ensure!(
+        start_internal || !host_of(url).is_some_and(|host| internal_host(&host)),
+        "the page led to an internal address: {url}"
+    );
+    Ok(())
+}
+
+async fn observe(cdp: &mut Cdp, start_internal: bool) -> Result<Value> {
     let mut failure = anyhow::anyhow!("page did not settle");
     for _ in 0..10 {
         match cdp.eval(SNAPSHOT).await {
@@ -396,6 +444,7 @@ async fn observe(cdp: &mut Cdp) -> Result<Value> {
                     url.starts_with("http://") || url.starts_with("https://"),
                     "the page left http(s): {url}"
                 );
+                check_destination(url, start_internal)?;
                 return Ok(page);
             }
             Ok(_) => {}
@@ -431,7 +480,13 @@ struct Cdp {
 
 async fn launch() -> Result<(Chrome, Cdp)> {
     let dir = std::env::temp_dir().join(format!("decision-tools-chrome-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir)?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
+    }
     let child = Command::new(chrome_binary()?)
         .args([
             "--headless=new",
@@ -729,6 +784,34 @@ mod tests {
             !action_space(&actions, false)
                 .targets
                 .contains_key("TYPE_TEXT")
+        );
+    }
+
+    #[test]
+    fn public_pages_cannot_lead_the_browser_into_the_local_network() {
+        for url in [
+            "http://localhost:5173/",
+            "http://127.0.0.1/",
+            "http://[::1]:80/x",
+            "http://10.1.2.3/",
+            "http://192.168.0.5/",
+            "http://169.254.169.254/latest",
+            "http://nas.local/",
+            "http://u:p@172.16.0.1/",
+        ] {
+            assert!(check_destination(url, false).is_err(), "{url}");
+            assert!(check_destination(url, true).is_ok(), "{url}");
+        }
+        for url in [
+            "https://example.com/",
+            "http://8.8.8.8/",
+            "https://user@example.org:8443/a?b=c#d",
+        ] {
+            assert!(check_destination(url, false).is_ok(), "{url}");
+        }
+        assert_eq!(
+            host_of("https://User:pw@Example.COM:8443/p?q"),
+            Some("example.com".into())
         );
     }
 

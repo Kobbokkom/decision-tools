@@ -110,7 +110,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Check or operate a web page with a private headless Chrome. Give a starting URL (localhost works), the goal, and the exact content or URL that shows it is met. The browser acts only on observed controls and stops at the step budget. The task, URLs, page text and controls go to OpenRouter after allow_provider, so use synthetic or approved data. Typing is off unless allow_typing is set. Check the returned final URL and text yourself.",
+        description = "Check or operate a web page with a private headless Chrome. Give a starting URL (localhost works), the goal, and the exact content or URL that shows it is met. The browser acts only on observed controls and stops at the step budget. The task, URLs, page text and controls go to OpenRouter after allow_provider, so use synthetic or approved data. Typing is off unless allow_typing is set, but clicks and dropdown choices always run and can submit or change things, so name only safe actions in the goal. A public page that leads to a loopback or private-network address is refused. Check the returned final URL and text yourself.",
         annotations(open_world_hint = true)
     )]
     async fn browse(&self, Parameters(args): Parameters<BrowseRequest>) -> CallToolResult {

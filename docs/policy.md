@@ -12,4 +12,4 @@ A deployment serves a single trusted operator group. Authenticated clients share
 
 ## Local tools
 
-`grep` sends excerpts of files under the requested root, and `browse` sends the task, URLs, page text and controls, to the selected provider. Call them only for source and pages cleared for that provider. `browse` runs a throwaway Chrome profile with no saved sign-ins, and it never types unless the call allows it. Treat both results as leads and check them against the source or the page.
+`grep` sends excerpts of files under the requested root, and `browse` sends the task, URLs, page text and controls, to the selected provider. Call them only for source and pages cleared for that provider. `browse` runs a throwaway Chrome profile with no saved sign-ins and never types unless the call allows it. Clicks and dropdown choices always run and can submit or change things, so state only safe actions in the goal. A public page cannot lead it to a loopback or private-network address. Treat both results as leads and check them against the source or the page.

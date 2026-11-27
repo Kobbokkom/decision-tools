@@ -38,7 +38,9 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     "coverage",
 ];
-const KEY_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "keystore", "jks"];
+const KEY_EXTENSIONS: &[&str] = &[
+    "pem", "key", "p12", "pfx", "p8", "keystore", "jks", "kdbx", "tfstate", "tfvars",
+];
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -82,9 +84,10 @@ pub async fn search(decision: &Decision, request: SearchRequest) -> Result<Value
     let root = PathBuf::from(&request.root);
     ensure!(root.is_absolute(), "root must be an absolute path");
     let root = root.canonicalize().context("root is not readable")?;
+    let home = std::env::var_os("HOME").and_then(|home| PathBuf::from(home).canonicalize().ok());
     ensure!(
-        root.is_dir() && root.parent().is_some(),
-        "root must be a directory below the filesystem root"
+        root.is_dir() && root.components().count() > 2 && home.as_ref() != Some(&root),
+        "root must be a project directory, not the filesystem root, a top-level folder or the home folder"
     );
     let max_results = request.max_results.unwrap_or(8).clamp(1, 20);
     let max_requests = request.max_requests.unwrap_or(200).clamp(2, 1000);
@@ -395,6 +398,7 @@ fn sensitive_name(path: &Path) -> bool {
         .to_lowercase();
     KEY_EXTENSIONS.contains(&extension.as_str())
         || name.starts_with("id_")
+        || name == "kubeconfig"
         || name.starts_with(".env")
         || matches!(
             stem.as_str(),
@@ -423,6 +427,7 @@ mod tests {
         fs::write(root.join("node_modules/dep/index.js"), "x").unwrap();
         fs::write(root.join("secrets.json"), "{}").unwrap();
         fs::write(root.join("deploy.pem"), "x").unwrap();
+        fs::write(root.join("prod.tfvars"), "x").unwrap();
         fs::write(root.join("Cargo.lock"), "x").unwrap();
         fs::write(root.join("image.bin"), [0u8, 159, 146, 150]).unwrap();
         fs::write(root.join("notes.txt"), "-----BEGIN PRIVATE KEY-----\nabc").unwrap();
@@ -437,7 +442,7 @@ mod tests {
         let (files, skipped) = collect(dir.path()).unwrap();
         let names: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(names, ["src/telemetry.rs"]);
-        assert_eq!(skipped.sensitive, 4);
+        assert_eq!(skipped.sensitive, 5);
         assert_eq!(skipped.binary, 1);
     }
 
@@ -476,6 +481,31 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "source search requires allow_provider");
+    }
+
+    #[tokio::test]
+    async fn broad_roots_are_refused() {
+        let home = std::env::var("HOME").unwrap();
+        for root in ["/", "/Users", home.as_str()] {
+            let error = search(
+                &Decision::Demo,
+                SearchRequest {
+                    question: "where".into(),
+                    root: root.into(),
+                    max_results: None,
+                    max_requests: None,
+                    allow_provider: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("root must be a project directory"),
+                "{root}"
+            );
+        }
     }
 
     #[tokio::test]
